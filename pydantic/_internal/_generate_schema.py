@@ -291,6 +291,10 @@ def _sort_union_args_subclasses_first(args: tuple[Any, ...] | list[Any]) -> tupl
     this sorting a ``Parent | Child`` union would incorrectly serialize ``Child``
     instances as ``Parent`` (since ``isinstance(child, Parent)`` is ``True``).
 
+    Only pydantic ``BaseModel`` subclasses are considered when sorting; built-in
+    Python types such as ``int | bool`` are left in user-specified order to avoid
+    changing validation behaviour for well-established type hierarchies.
+
     The sort is stable: unrelated types preserve their original relative order.
     Only types that are strict subclasses of other union members are moved earlier.
 
@@ -298,36 +302,46 @@ def _sort_union_args_subclasses_first(args: tuple[Any, ...] | list[Any]) -> tupl
         args: The union member types to sort.
 
     Returns:
-        A new list with subclasses ordered before their parent classes.
+        A new list with subclasses ordered before their parent classes, or the
+        original sequence unchanged if no reordering is needed.
     """
-
-    def _is_strict_subclass(a: Any, b: Any) -> bool:
-        try:
-            return isinstance(a, type) and isinstance(b, type) and issubclass(a, b) and a is not b
-        except TypeError:
-            return False
-
     n = len(args)
     if n <= 1:
         return args
 
-    # Specificity of arg[i] = count of other union members that arg[i] is a strict subclass of.
+    BaseModel_ = import_cached_base_model()
+
+    def _is_model_subclass(a: Any, b: Any) -> bool:
+        """Return True iff both are pydantic models and ``a`` is a strict subclass of ``b``."""
+        try:
+            return (
+                isinstance(a, type)
+                and isinstance(b, type)
+                and issubclass(a, BaseModel_)
+                and issubclass(b, BaseModel_)
+                and issubclass(a, b)
+                and a is not b
+            )
+        except TypeError:
+            return False
+
+    # Specificity of arg[i] = count of other union members that arg[i] is a strict model-subclass of.
     # A higher specificity means the type is more derived and should come first.
     specificity = [0] * n
     any_nonzero = False
     for i in range(n):
         for j in range(n):
-            if i != j and _is_strict_subclass(args[i], args[j]):
+            if i != j and _is_model_subclass(args[i], args[j]):
                 specificity[i] += 1
                 any_nonzero = True
 
-    # Fast path: no subclass relationships found — return original order unchanged.
-    # This is the common case (e.g. Optional[X], unrelated union members).
+    # Fast path: no model-subclass relationships found — return original order unchanged.
+    # This is the common case (e.g. Optional[X], unrelated union members, int | bool).
     if not any_nonzero:
         return args
 
     # Stable descending sort: higher specificity (more derived) types come first.
-    return [arg for arg, _ in sorted(zip(args, specificity), key=lambda x: -x[1])]
+    return [arg for arg, _ in sorted(zip(args, specificity, strict=False), key=lambda x: -x[1])]
 
 
 def _extract_json_schema_info_from_field_info(
